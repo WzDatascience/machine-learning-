@@ -4,593 +4,1058 @@
 # In[1]:
 
 
-#挑选数据样本
-max_size=100000
-size=0
-with open('C:/Users/zhouwei/Desktop/fresh_comp_offline/sample.csv','wb')as file:
-    with open('C:/Users/zhouwei/Desktop/fresh_comp_offline/tianchi_fresh_comp_train_user.csv','rb')as reader:
-        while size<=max_size:
-            size+=1
-            line=reader.readline()
-            file.write(line)
-
-
-# In[37]:
-
-
-import time, datetime
-import numpy as np
 import pandas as pd
-from collections import defaultdict
-from matplotlib import pyplot as plt
-import pandas as pd
-import warnings
-import numpy as np
-warnings.filterwarnings('ignore')
-from sklearn.model_selection import train_test_split
-from xgboost.sklearn import XGBClassifier
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import OneHotEncoder
-data=pd.read_csv('C:/Users/zhouwei/Desktop/fresh_comp_offline/tianchi_fresh_comp_train_user.csv')
+import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+import gc
 
 
-# In[38]:
+# In[2]:
 
 
-pd.options.display.max_columns=100
-count_user=df['behavior_type'].value_counts()
-#计算CVR购买转换率
-count_all=count_user[1]+count_user[2]+count_user[3]+count_user[4]
-count_4=count_user[4]
-CVR=count_4/count_all
-#将time类型设置成datetime 类
-data['time']=pd.to_datetime(data['time'])
-
-def get_weekday(i):
-    return i.weekday()
-
-data['weekday']=data['time'].apply(get_weekday)+1
-data['hour']=data['time'].dt.hour
+raw=pd.read_csv('C:/Users/zhouwei/Desktop/Baidu推荐系统/train.csv')
 
 
-# In[40]:
+# In[3]:
 
 
-#购买行为数目和浏览数目有很大的差别，后期可以考虑进行样本采样,因为很多人在同一时间进行多次的浏览操作
-data['behavior_type'].value_counts()
+raw.head()
 
 
-# In[41]:
+# In[4]:
 
 
-
-#对所有用户和商品的数据进行小时，以及一周中每天的购买情况进行可视化,从图表上来看，用户从早上的7点左右开始行为开始变得增加，在晚上8点以后到次日凌晨零点比较频繁
-df_hour=data.groupby('hour')['behavior_type'].value_counts().unstack()
-df_hour.plot(kind='bar',figsize=(10,10))
+raw.isnull().sum()
 
 
-# In[42]:
+# In[5]:
 
 
-#对一周的行为进行可视化,得出用户在周五时购买行为会比较频繁
-plt.rcParams['font.sans-serif'] = ['SimHei']
-data[data['behavior_type']==1].groupby('weekday')['behavior_type'].count().plot(kind='bar',title='浏览量')
-plt.show()
-data[data['behavior_type']==2].groupby('weekday')['behavior_type'].count().plot(kind='bar',title='点击量')
-plt.show()
-data[data['behavior_type']==3].groupby('weekday')['behavior_type'].count().plot(kind='bar',title='收藏')
-plt.show()
-data[data['behavior_type']==4].groupby('weekday')['behavior_type'].count().plot(kind='bar',title='购买')
+#大部分用户都没有进行评价
+raw.is_customer_rate.value_counts()
 
 
-# In[43]:
+# In[6]:
 
 
-df_copy=data.copy().set_index('time')
-#对每天的行为数量进行可视化
-str='2014-11-18'
-temp=datetime.datetime.strptime(str,'%Y-%m-%d')
-delta=datetime.timedelta(days=1)
-count_day=defaultdict(int)
-for _ in range(30):
-    temp+=delta
-    temp_str=temp.strftime('%Y-%m-%d')
-    #统计每天的行为数
-    count_day[temp_str]=count_day[temp_str]+df_copy[temp_str].shape[0]   
+raw.order_detail_status.value_counts()
+
+
+# In[7]:
+
+
+raw.goods_status.value_counts()
+
+
+# In[8]:
+
+
+#对数据集中u用户进行复购行为时间进行统计。
+df=raw[['customer_id','order_pay_time']]
+df=df.sort_values(by=['order_pay_time'])
+purchase_first_time=df.drop_duplicates('customer_id',keep='first')
+purchase_last_time=df.drop_duplicates('customer_id',keep='last')
+df_time=pd.merge(purchase_first_time,purchase_last_time,on='customer_id',how='outer')
+
+
+# In[9]:
+
+
+df_time.head()
+df_time.dropna()
+
+
+# In[10]:
+
+
+df_time['time_gap']=(pd.to_datetime(df_time.order_pay_time_y)-pd.to_datetime(df_time.order_pay_time_x))
+#得出用户在进行重新购买的月数
+df_time.time_gap=df_time.time_gap.dt.days/30
+
+
+# In[11]:
+
+
+#time_gap等于0说明用户没有进行重新购买的行为
+df_repurchase=df_time[df_time.time_gap>0]
+#将复购的时间进行可视化,大部分的用户会在3个月以内进行复购行为
+plt.hist(df_repurchase.time_gap)
+
+
+# In[24]:
+
+
+#对会员折扣进行数据探索,从数据上显示大约有92%的商品并不支持会员折扣，所以对于大量会员数据#
+#缺失问题，可以将会员的特征进行删除，基本上可以假设会员没有影响
+raw.groupby('goods_has_discount')['goods_id'].count()[0]/raw.shape[0]
+
+
+# In[12]:
+
+
+#对商品id进行标签编码
+raw['goods_id']=pd.factorize(raw.goods_id)[0]
+
+
+# In[13]:
+
+
+def preprocess(train):
+    #对数据进行特征构造(从用户的维度)
+    data=pd.DataFrame(raw.groupby('customer_id')['customer_gender'].last().fillna(0))
+    #添加新的列（针对每个用户，最后一次的行为）商品
+    data[['order_id_last','goods_id_last','goods_status_last','goods_price_last','goods_has_discount_last','goods_list_time_last','goods_delist_time_last']]=raw.groupby('customer_id')['order_id','goods_id','goods_status','goods_price','goods_has_discount','goods_list_time','goods_delist_time'].last()
+    #针对订单的最后一次行为添加新的列
+    data[['order_total_num_last','order_amount_last','order_total_payment_last','order_total_discount_last','order_pay_time_last','order_status_last','order_count_last','is_customer_rate_last','order_detail_status_last','order_detail_goods_num_last','order_detail_amount_last','order_detail_payment_last']]=raw.groupby('customer_id')['order_total_num','order_amount','order_total_payment','order_total_discount','order_pay_time','order_status','order_count','is_customer_rate','order_detail_status','order_detail_goods_num','order_detail_amount','order_detail_payment'].last()
+    #对商品的原始价格进行统计字段
+    data[['goods_price_mean','goods_price_min','goods_price_max','goods_price_median']]=raw.groupby('customer_id').agg({'goods_price':['mean','min','max','median']})
+    data[['goods_price_std']]=raw.groupby('customer_id')['goods_price'].std(ddof=0)
+    #订单实付金额统计字段
+    data[['order_detail_payment_mean','order_detail_payment_min','order_detail_payment_max','order_detail_payment_median']]=raw.groupby('customer_id').agg({'order_detail_payment':['mean','min','max','median']})
+    data[['order_detail_payment_std']]=raw.groupby('customer_id')['order_detail_payment'].std(ddof=0)
+    #用户购买的订单数量vf
+    data[['order_count']]=raw.groupby('customer_id')['order_id'].count()
+    #用户购买的商品数量
+    data[['goods_count']]=raw.groupby('customer_id')['order_detail_goods_num'].sum()
+    #用户所在省份
+    # data[['province']]=raw(raw['customer_id'].isin(data.index.to_list())['customer_province']
+    #用户购买goods数量
+    data[['goods_amount']]=raw.groupby('customer_id')['goods_id'].nunique()
+    #商品折扣统计属性
+    data[['order_total_discount_mean','order_total_discount_min','order_total_discount_max','order_total_discount_median']]=raw.groupby('customer_id').agg({'order_total_discount':['mean','min','max','median']})
+    data[['order_total_discount_std']]=raw.groupby('customer_id')['order_total_discount'].std(ddof=0)
+    #订单商品数量统计属性
+    data[['order_detail_goods_num_mean','order_detail_goods_num_min','order_detail_goods_num_max','order_detail_goods_num_median']]=raw.groupby('customer_id').agg({'order_detail_goods_num':['mean','min','max','median']})
+    data[['order_detail_goods_num_std']]=raw.groupby('customer_id')['order_detail_goods_num'].std(ddof=0)
+    #商品最新上架时间diff,以‘2013-01-01 00:00:00’为例
+    t=datetime.datetime.strptime('2013-01-01 00:00:00','%Y-%m-%d %H:%M:%S')
+    data[['goods_list_time_diff']]=data['goods_list_time_last'].map(lambda x:(datetime.datetime.strptime(x,'%Y-%m-%d %H:%M:%S')-t).days/365)
+    data[['goods_delist_time_diff']]=data['goods_delist_time_last'].map(lambda x:(datetime.datetime.strptime(x,'%Y-%m-%d %H:%M:%S')-t).days/365)
+    #商品上架与下架时间差
+    data[['goods_delist_list_timediff']]=((pd.to_datetime(data['goods_delist_time_last'])-pd.to_datetime(data['goods_list_time_last'])).dt.days)/365
+    #商品支付时间与上下架时间差
+    data[['goods_payment_list_timediff']]=((pd.to_datetime(data['goods_list_time_last'])-pd.to_datetime(data['order_pay_time_last'])).dt.days)/365
+    data[['goods_payment_delist_timediff']]=((pd.to_datetime(data['goods_delist_time_last'])-pd.to_datetime(data['order_pay_time_last'])).dt.days)/365
     
-df_count_day=pd.DataFrame.from_dict(count_day,orient='index',columns=['count'])
-
-
-# In[44]:
-
-
-#可以发现用户在双12和12月14日进行的操作比较频繁
-df_count_day.plot(kind='bar')
-plt.legend(loc='best')
-plt.grid(True)
-
-
-# In[45]:
-
-
-#查看对预估对商品子集12月19号之前行为
-df_p=pd.read_csv('C:/Users/zhouwei/Desktop/fresh_comp_offline/tianchi_fresh_comp_train_item.csv')
-df_merge=pd.merge(df_p,df.reset_index(),on='item_id').set_index('time')
-df_merge
-
-
-# In[48]:
-
-
-#对商品子集进行一天所有小时的行为进行可视化。
-df_copy=df.copy().set_index('time')
-def show_count_hour(date1):
-    count_hour={}
-    for i in range(24):
-        time_str=date1+ ' %02.d'%i
-        count_hour[time_str]=[0,0,0,0]
-        temp=df_copy[time_str]['behavior_type'].value_counts()
-        for j in range(len(temp)):
-            count_hour[time_str][temp.index[j]-1]+=temp[temp.index[j]]
-    df_count_hour=pd.DataFrame.from_dict(count_hour,orient='index')
-    df_count_hour.plot(kind='bar')
-    plt.legend(loc='legend')
-show_count_hour('2014-12-18')
+    return data
 
 
 # In[14]:
 
 
-df_merge.drop(columns=['item_geohash','user_geohash'],axis=0,inplace=True)
-df_merge=df_merge.drop('item_category_y',axis=1).rename(columns={'item_category_x':'item_category'})
 
 
-# # 直接从数据子集进行预测
-# 
-# 根据18号的数据对19号进行预测，对那些已经在18号将物品加入到购物车的人假定这些人都会进行在19号进行购买
 
-# In[49]:
+# In[16]:
 
 
-temp=df_merge['2014-11-18']
-temp[temp['behavior_type']==3]
+#从订单的维度进行特征构建
+def order_feature(data):
+    #最后一个订单的订单数量
+    data=pd.DataFrame(raw.groupby('order_id')['order_amount'].last())
+    #添加新的列（针对每个订单，最后一次的数据）
+    data[['order_total_last_payment','order_total_last_discount','order_last_pay_time']]=raw.groupby('order_id')['order_total_payment','order_total_discount','order_pay_time'].last()
+    data[['order_last_status','order_last_count','order_last_detail_status','last_order_good_num']]=raw.groupby('order_id')['order_status','order_count','order_detail_status','order_detail_amount'].last()
+    data[['order_last_payment','order_last_discount']]=raw.groupby('order_id')['order_detail_payment','order_detail_discount'].last()
+    return data
+
+#从商品维度进行构建
+def goods_feature(data):
+    data=pd.DataFrame(raw.groupby('goods_id')['goods_class_id'].last())
+    data[['last_good_status','last_discount','goods_last_list_time','goods_last_detail_time']]=raw.groupby('goods_id')['goods_status','goods_has_discount','goods_list_time','goods_detail_time'].last()
+    data[['goods_time_gap']]=((pd.to_datetime(data['goods_last_detail_time'])-pd.to_datetime(data['goods_last_list_time'])).dt.days)/365
+    return data 
+#还可以从用户商品，用户与订单维度进行构建
 
 
-# # 对原始数据集进行建模
-
-# 将数据分成几个周期进行训练，part1用来做训练，part2用来做验证集，part3用来预测
-# 
-#     part1：11.22-11.27 > 11.28;
-#     part2：11.29-12.04 > 12.05;
-#     part3：12.13-12.18 > 12.19;
-
-# In[ ]:
+# In[14]:
 
 
-data.time=pd.to_datetime(data.time)
-data.set_index('time',inplace=True)
-trainset=data['2014-11-22':'2014-11-28']
-validationset=data['2014-11-29':'2014-12-05']
-testset=data['2014-12-13':'2014-12-19']
-
-
-# In[ ]:
-
-
-#添加label,购买的行为1，其它行为为0，成为二分类问题
-def labelcreate(data):
-    purchase=data[data['behavior_type']==4]
-    purchase['label']=1
-    others=data[data['behavior_type']!=4]
-    others['label']=0
-    new_data=pd.concat([purchase,others])
-    return new_data
+#将8月份之前的数据作为训练集
+train=raw[raw['order_pay_time']<='2013-07-31 23:59:59']
 
 
 # In[ ]:
 
 
-#将trainset子集划分训练集和测试集
-train_part=trainset['2014-11-22':'2014-11-27']
-test_part=trainset['2014-11-28']
-test_part=labelcreate(test_part)
-train_part.reset_index(inplace=True)
+order_data=order_feature(train).reset_index()
+goods_data=goods_feature(train).reset_index()
+customer_data=preprocess(train)
+
+
+# In[16]:
+
+
+#将用户进行复购的时间作为一个特征
+df_time=df_time.set_index('customer_id')
+customer_data[['repurchase_month']]=df_time.time_gap
 
 
 # In[ ]:
 
 
-#将user和用户行为进行计数得出用户行为总数
-def u_b_count(data,n,date):
-    data=data[data['time'] >= np.datetime64(date)]
-    data['cumcount']=data.groupby(['user_id','behavior_type']).cumcount()
-    u_b_count=data.drop_duplicates(['user_id','behavior_type'],keep='last')[['user_id','behavior_type','cumcount']]
-    u_b_count=pd.get_dummies(u_b_count['behavior_type']).join(u_b_count[['user_id','cumcount']])
-    u_b_count.rename(columns={1:'behavior_type1',2:'behavior_type2',3:'behavior_type3',4:'behavior_type4'},inplace=True)
-    u_b_count['u_b1_count_in_{}'.format(n)]=u_b_count['behavior_type1']*(u_b_count['cumcount']+1)
-    u_b_count['u_b2_count_in_{}'.format(n)]=u_b_count['behavior_type2']*(u_b_count['cumcount']+1)
-    u_b_count['u_b3_count_in_{}'.format(n)]=u_b_count['behavior_type3']*(u_b_count['cumcount']+1)
-    u_b_count['u_b4_count_in_{}'.format(n)]=u_b_count['behavior_type4']*(u_b_count['cumcount']+1)
-    u_b_count=u_b_count.groupby('user_id').agg({'u_b1_count_in_{}'.format(n): np.sum,
-                                                          'u_b2_count_in_{}'.format(n): np.sum,
-                                                           'u_b3_count_in_{}'.format(n): np.sum,
-                                                           'u_b4_count_in_{}'.format(n): np.sum})
-    u_b_count['u_b_count_in_{}'.format(n)]=u_b_count[['u_b1_count_in_{}'.format(n),'u_b2_count_in_{}'.format(n),'u_b3_count_in_{}'.format(n), 'u_b4_count_in_{}'.format(n)]].apply(lambda x: x.sum(), axis = 1)
-    return u_b_count
+#将三个数据集进行合并
+merge=pd.merge(customer_data,order_data,how='outer',on='order_id')
+merge=pd.merge(merge,goods_data,how='outer',on='goods_id')
+
+
+# In[17]:
+
+
+#8月份的数据作为label
+label=set(raw[raw['order_pay_time']>'2013-07-31 23:59:59']['customer_id'].dropna())
+merge['labels']=merge.index.map(lambda x: int(x in label))
+
+
+# In[18]:
+
+
+#将8月份的数据作为test预测9月份的购买
+test=raw[raw['order_pay_time']>'2013-07-31 23:59:59']
+test=preprocess(test)
+test_order_data=order_feature(test).reset_index()
+test_goods_data=goods_feature(test).reset_index()
+test[['repurchase_month']]=df_time.time_gap
+test_merged=pd.merge(test,test_order_data,on='order_id',how='outer')
+test_merged=pd.merge(test_merges,test_goods_data,on='goods_id',how='outer')
+
+
+# In[19]:
+
+
+merge.isnull().sum()
+
+
+# In[20]:
+
+
+test_merged.isnull().sum()
+
+
+# In[21]:
+
+
+#将空值进行填充
+merged_train=merged.fillna(-1)
+merged_test=test_merged.fillna(-1)
+
+
+# In[22]:
+
+
+merged_train.columns
+
+
+# In[23]:
+
+
+#去掉不需要的特征
+final=merged_train.drop(columns=['order_id_last','goods_id_last','goods_list_time_last','goods_delist_time_last', 'order_pay_time_last'],axis=1)
+final_test=merged_test.drop(columns=['order_id_last','goods_id_last','goods_list_time_last','goods_delist_time_last', 'order_pay_time_last'],axis=1)
+
+
+# In[25]:
+
+
+#对数据进行交叉验证法评估
+from sklearn.model_selection import KFold,cross_val_score
+from sklearn.metrics import f1_score,make_scorer
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost.sklearn import XGBClassifier
+from lightgbm.sklearn import LGBMClassifier
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+
+
+# In[26]:
+
+
+#定义损失函数
+def func(y,p):
+    loss=sum(y*np.log(p)*40+(1-y)*np.log(1-p))
+    return loss
+
+
+# In[27]:
+
+
+X=merged_train.drop('labels',axis=1)
+Y=merged_train[['labels']]
+Y
+
+
+# In[28]:
+
+
+#将数据进行归一化
+model=MinMaxScaler()
+X_train=pd.DataFrame(model.fit_transform(X),columns=X.columns)
+
+
+# In[29]:
+
+
+X_train
+
+
+# In[30]:
+
+
+result={}
+kfold=KFold(n_splits=5,shuffle=True)
+for train_set,val_set in kfold.split(X_train):
+    x_train,x_val=X_train.iloc[train_set],X_train.iloc[val_set]
+    y_train,y_val=Y.iloc[train_set],Y.iloc[val_set]
+
+
+# In[31]:
+
+
+
+#构建jiandan模型函数
+def logistic(x_train,y_train,x_val,y_val):
+    logistic=LogisticRegression()
+    logistic.fit(x_train,y_train)
+    result=logistic.predict(x_val)
+    score=f1_score(result,y_val)
+    return score
+def tree(x_train,y_train,x_val,y_val):
+    tree=RandomForestClassifier(n_estimators=100,max_depth=10,random_state=2020)
+    tree.fit(x_train,y_train)
+    result=tree.predict(x_val)
+    score=f1_score(result,y_val)
+    return score 
+
+def xgb(x_train,y_train,x_val,y_val):
+    xgb=XGBClassifier(n_estimators=1000,max_depth=10,learning_rate=0.01,subsample=0.8,colsample_bytree=0.8,random_state=2000)
+    xgb.fit(x_train,y_train)
+    result=xgb.predict(x_val)
+    score=f1_score(result,y_val)
+    return score 
+
+def lgb(x_train,y_train,x_val,y_val):
+    lgb=LGBMClassifier(n_estimators=1000,max_depth=10,subsample=0.7,colsample_bytree=0.7,learning_rate=0.01,random_state=2020)
+    lgb.fit(x_train,y_train)
+    result=lgb.predict(x_val)
+    score=f1_score(result,y_val)
+    return score
 
 
 # In[ ]:
 
 
-u_b_count_in_6=u_b_count(train_part,6,'2014-11-22')
-u_b_count_in_3=u_b_count(train_part,3,'2014-11-25')
-u_b_count_in_1=u_b_count(train_part,1,'2014-11-27')
+#进行内存回收
+del raw,data
+gc.collect()
+
+
+# In[32]:
+
+
+logistic(x_train,y_train,x_val,y_val)
+
+
+# In[33]:
+
+
+tree(x_train,y_train,x_val,y_val)
 
 
 # In[ ]:
 
 
-u_b_count_in_6=u_b_count_in_6.reset_index()
-u_b_count_in_3=u_b_count_in_3.reset_index()
-u_b_count_in_1=u_b_count_in_1.reset_index()
-#将数据进行合并
-merged_df=pd.merge(u_b_count_in_6,u_b_count_in_3,on = ['user_id'],how = 'left')
-merged_df=pd.merge(merged_df,u_b_count_in_1,on=['user_id'],how='left')
+#进行调参
+lg=LGBMRegressor()
+xg=XGBRegressor()
+n_estimators = [i*100 for i in range(0,20)]
+max_depth = [i for i in range(20)]
+learning_rate=[i*0.01 for i in range(0,10)]
+subsample=[i*0.1 for i in range(0,10)]
+colsample_bytree=[i*0.1 for i in range(0,10)]
+parameters={'n_estimators':n_estimators,'max_depth':max_depth,'learning_rate':learning_rate,'subsample':subsample,'colsample_bytree':colsample_bytree}
+clf=GridSearchCV(xg,parameters,cv=3,scoring='mae')
+clf.fit(x_train,y_train)
+print('最佳参数：',clf.best_params_)
+y_predict=clf.predict(x_val)
+mean_absolute_error(y_predict,y_val)
 
 
 # In[ ]:
 
 
-#离观测天前6天的点击购买率
-merged_df['u_b4_rate']=merged_df['u_b4_count_in_6']/merged_df['u_b_count_in_6']
 
-
-# In[ ]:
-
-
-#用户第一次购买与用户第一次浏览的时间间隔
-def time_gap(data):
-    data.sort_values(by=['user_id','time'])
-    user_first_purchase=data[data['behavior_type']==4].drop_duplicates(['user_id'],'first')[['user_id','time']]
-    user_first_purchase.columns=['user_id','b4_first_time']
-    #用户第一次行为时间
-    user_first_behavior=data.drop_duplicates(['user_id'],keep='first')[['user_id','time']]
-    user_first_behavior.columns=['user_id','b_first_time']
-    time_gap=pd.merge(user_first_behavior,user_first_purchase,on=['user_id'])
-    time_gap['u_b4_diff_time']=time_gap['b4_first_time']-time_gap['b_first_time']
-    time_gap['u_b4_diff_hours']=time_gap['u_b4_diff_time'].apply(lambda x:x.days*24+x.seconds//3600)
-    return time_gap
-time_gap_pb=time_gap(train_part)
 
 
 # In[ ]:
 
 
-temp1=pd.merge(merged_df,time_gap_pb,on=['user_id'],how='left')[['user_id',
-                                                       'u_b1_count_in_6', 
-                                                       'u_b2_count_in_6', 
-                                                       'u_b3_count_in_6', 
-                                                       'u_b4_count_in_6', 
-                                                       'u_b_count_in_6',
-                                                       'u_b1_count_in_3',
-                                                       'u_b2_count_in_3', 
-                                                       'u_b3_count_in_3',
-                                                       'u_b4_count_in_3', 
-                                                       'u_b_count_in_3',
-                                                       'u_b1_count_in_1',
-                                                       'u_b2_count_in_1', 
-                                                       'u_b3_count_in_1',
-                                                       'u_b4_count_in_1', 
-                                                       'u_b_count_in_1', 
-                                                       'u_b4_rate', 
-                                                       'u_b4_diff_hours']]
+
 
 
 # In[ ]:
 
 
-#计算商品在testday前n天用户计数
-def i_u_count(data,n,date):
-    data=data[data['time'] >= np.datetime64(date)]
-    i_u_count=data.drop_duplicates(['item_id','user_id'])
-    i_u_count['i_u_count_in_{}'.format(n)]=i_u_count.groupby('item_id').cumcount()+1
-    i_u_count=i_u_count.drop_duplicates(['item_id'],'last')[['item_id','i_u_count_in_{}'.format(n)]]
-    return i_u_count
-i_u_count_in1=i_u_count(train_part,1,'2014-11-27')
-i_u_count_in3=i_u_count(train_part,3,'2014-11-25')
-i_u_count_in6=i_u_count(train_part,6,'2014-11-22')
-#数据集合并
-merged_df1=pd.merge(i_u_count_in1,i_u_count_in3,on=['item_id'],how='left')
-merged_df1=pd.merge(merged_df1,i_u_count_in6,on=['item_id'],how='left')
+
 
 
 # In[ ]:
 
 
-#计算商品前n天每种行为的数量以及行为总数
-def i_b_count(data,n,date):
-    data=data[data['time'] >= np.datetime64(date)]
-    i_b_count=data.copy()
-    i_b_count['cumcount']=i_b_count.groupby(['item_id','behavior_type']).cumcount()+1
-    i_b_count=i_b_count.drop_duplicates(['item_id','behavior_type'],'last')[['item_id','behavior_type','cumcount']]
-    i_b_count=pd.get_dummies(i_b_count['behavior_type']).join(i_b_count[['item_id','cumcount']])
-    i_b_count.rename(columns={1:'behavior_type1',2:'behavior_type2',3:'behavior_type3',4:'behavior_type4'},inplace=True)
-    i_b_count['i_b1_count_in{}'.format(n)]=i_b_count['behavior_type1']*i_b_count['cumcount']
-    i_b_count['i_b2_count_in{}'.format(n)]=i_b_count['behavior_type2']*i_b_count['cumcount']
-    i_b_count['i_b3_count_in{}'.format(n)]=i_b_count['behavior_type3']*i_b_count['cumcount']
-    i_b_count['i_b4_count_in{}'.format(n)]=i_b_count['behavior_type4']*i_b_count['cumcount']
-    i_b_count=i_b_count[['item_id','i_b1_count_in{}'.format(n),'i_b2_count_in{}'.format(n),'i_b3_count_in{}'.format(n),'i_b4_count_in{}'.format(n)]]
-    i_b_count=i_b_count.groupby('item_id').agg({'i_b1_count_in{}'.format(n): np.sum,
-                                  'i_b2_count_in{}'.format(n): np.sum,
-                                  'i_b3_count_in{}'.format(n): np.sum,
-                                  'i_b4_count_in{}'.format(n): np.sum})
-    i_b_count.reset_index()
-    #计算商品的总行为数
-    i_b_count['i_b_count_in{}'.format(n)]=i_b_count['i_b1_count_in{}'.format(n)]+i_b_count['i_b2_count_in{}'.format(n)]+i_b_count['i_b3_count_in{}'.format(n)]+i_b_count['i_b4_count_in{}'.format(n)]
-    return i_b_count
+
 
 
 # In[ ]:
 
 
-i_b_count_1=i_b_count(train_part,1,'2014-11-27').reset_index()
-i_b_count_3=i_b_count(train_part,3,'2014-11-25').reset_index()
-i_b_count_6=i_b_count(train_part,6,'2014-11-22').reset_index()
-#数据集合并
-temp_ib=pd.merge(i_b_count_1,i_b_count_3,on='item_id',how='left')
-temp_ib=pd.merge(temp_ib,i_b_count_6,on='item_id',how='left')
+
 
 
 # In[ ]:
 
 
-#商品购买率
-temp_ib['i_b4_rate']=temp_ib['i_b4_count_in6']/temp_ib['i_b_count_in6']
 
-
-# In[ ]:
-
-
-#商品第一次行为与被购买的行为的时间cha
-def time_gapib(data):
-    
-    i_first_purchase=data[data['behavior_type']==4].drop_duplicates(['item_id'],'first')[['item_id','time']]
-    i_first_purchase.columns=['item_id','b4_first_time']
-    i_first_behavior=data.drop_duplicates(['item_id'],'first')[['item_id','time']]
-    i_first_behavior.columns=['item_id','b_first_time']
-    i_time=pd.merge(i_first_behavior,i_first_purchase,on='item_id',how='left')
-    i_time['time_diff']=i_time['b4_first_time']-i_time['b_first_time']
-    i_time['i_b4_diff_hours']=i_time['time_diff'].apply(lambda x: x.days*24+x.seconds//3600)
-    i_time=i_time[['item_id','i_b4_diff_hours']]
-    return i_time
-time_gapib=time_gapib(train_part)
-#将所有与item有关的特征合并
-temp2=pd.merge(merged_df1,temp_ib,on='item_id',how='left')
-temp2=pd.merge(temp2,time_gapib,on='item_id',how='left')
 
 
 # In[ ]:
 
 
-#进行类别与用户之间关系特征构造
-def c_u_count(data,n,date):
-    data=data[data['time'] >= np.datetime64(date)]
-    c_u_count=data.drop_duplicates(['item_category','user_id'])
-    c_u_count['c_u_count_in_{}'.format(n)]=c_u_count.groupby('item_category').cumcount()+1
-    c_u_count=c_u_count.drop_duplicates(['item_category'],'last')[['item_category','c_u_count_in_{}'.format(n)]]
-    return c_u_count
-c_u_count_in1=c_u_count(train_part,1,'2014-11-27')
-c_u_count_in3=c_u_count(train_part,3,'2014-11-25')
-c_u_count_in6=c_u_count(train_part,6,'2014-11-22')
-c_u_count_in1
+
 
 
 # In[ ]:
 
 
-merged_cu=pd.merge(c_u_count_in1,c_u_count_in3,on=['item_category'],how='left')
-merged_cu=pd.merge(merged_cu,c_u_count_in6,on=['item_category'],how='left')
 
-
-# In[ ]:
-
-
-#每个商品类别与每个行为之间的数量
-def c_b_count(data,n,date):
-    c_b_count=data[data['time'] >= np.datetime64(date)]
-    
-    c_b_count['cumcount']=c_b_count.groupby(['item_category','behavior_type']).cumcount()+1
-    c_b_count=c_b_count.drop_duplicates(['item_category','behavior_type'],'last')[['item_category','behavior_type','cumcount']]
-    c_b_count=pd.get_dummies(c_b_count['behavior_type']).join(c_b_count[['item_category','cumcount']])
-    c_b_count.rename(columns={1:'behavior_type1',2:'behavior_type2',3:'behavior_type3',4:'behavior_type4'},inplace=True)
-    c_b_count['c_b1_count_in{}'.format(n)]=c_b_count['behavior_type1']*c_b_count['cumcount']
-    c_b_count['c_b2_count_in{}'.format(n)]=c_b_count['behavior_type2']*c_b_count['cumcount']
-    c_b_count['c_b3_count_in{}'.format(n)]=c_b_count['behavior_type3']*c_b_count['cumcount']
-    c_b_count['c_b4_count_in{}'.format(n)]=c_b_count['behavior_type4']*c_b_count['cumcount']
-    c_b_count=c_b_count[['item_category','c_b1_count_in{}'.format(n),'c_b2_count_in{}'.format(n),'c_b3_count_in{}'.format(n),'c_b4_count_in{}'.format(n)]]
-    c_b_count=c_b_count.groupby('item_category').agg({'c_b1_count_in{}'.format(n): np.sum,
-                                  'c_b2_count_in{}'.format(n): np.sum,
-                                  'c_b3_count_in{}'.format(n): np.sum,
-                                  'c_b4_count_in{}'.format(n): np.sum})
-    
-    #计算商品的总行为数
-    c_b_count['c_b_count_in{}'.format(n)]=c_b_count['c_b1_count_in{}'.format(n)]+c_b_count['c_b2_count_in{}'.format(n)]+c_b_count['c_b3_count_in{}'.format(n)]+c_b_count['c_b4_count_in{}'.format(n)]
-    return c_b_count
 
 
 # In[ ]:
 
 
-c_b_count_in1=c_b_count(train_part,1,'2014-11-27').reset_index()
-c_b_count_in3=c_b_count(train_part,3,'2014-11-25').reset_index()
-c_b_count_in6=c_b_count(train_part,6,'2014-11-22').reset_index()
+
 
 
 # In[ ]:
 
 
-merged_cb=pd.merge(c_b_count_in1,c_b_count_in3,on='item_category',how='left')
-merged_cb=pd.merge(merged_cb,c_b_count_in6,on='item_category',how='left')
-merged_cb['c_b4_rate']=merged_cb['c_b4_count_in6']/merged_cb['c_b_count_in6']
+
 
 
 # In[ ]:
 
 
-#商品类别第一次行为与被购买的行为的时间cha
-def time_gapcb(data):
-    ctimediff=data
-    ctimediff.sort_values(by=['item_category','time'])
-    c_first_purchase=ctimediff[ctimediff['behavior_type']==4].drop_duplicates(['item_category'],'first')[['item_category','time']]
-    c_first_purchase.columns=['item_category','b4_first_time']
-    c_first_behavior=ctimediff.drop_duplicates(['item_category'],'first')[['item_category','time']]
-    c_first_behavior.columns=['item_category','b_first_time']
-    c_time=pd.merge(c_first_behavior,c_first_purchase,on='item_category',how='left')
-    c_time['c_time_diff']=c_time['b4_first_time']-c_time['b_first_time']
-    c_time['c_b4_diff_hours']=c_time['c_time_diff'].apply(lambda x: x.days*24+x.seconds*3600)
-    c_time=c_time[['item_category','c_b4_diff_hours']]
-    return c_time
-time_gapcb=time_gapcb(train_part)
+
 
 
 # In[ ]:
 
 
-temp3=pd.merge(merged_cu,merged_cb,on='item_category',how='left')
-temp3=pd.merge(temp3,time_gapcb,on='item_category',how='left')
-temp3
+
 
 
 # In[ ]:
 
 
-#计算用户对商品在n天之前的行为数和行为总数
-def ui_b_count(data,n,date):
-    ui_b_count=data[data['time']>=np.datetime64(date)]
-    ui_b_count['cumcount']=ui_b_count.groupby(['user_id','item_id','behavior_type']).cumcount()+1
-    ui_b_count=ui_b_count.drop_duplicates(['user_id','item_id','behavior_type'],'last')[['user_id','item_id','behavior_type','cumcount']]
-    ui_b_count=pd.get_dummies(ui_b_count['behavior_type']).join(ui_b_count[['user_id','item_id','cumcount']])
-    ui_b_count=ui_b_count.rename(columns={1:'behavior_type1',2:'behavior_type2',3:'behavior_type3',4:'behavior_type4'})
-    ui_b_count['ui_b1_count_in{}'.format(n)]=ui_b_count['behavior_type1']*ui_b_count['cumcount']
-    ui_b_count['ui_b2_count_in{}'.format(n)]=ui_b_count['behavior_type2']*ui_b_count['cumcount']
-    ui_b_count['ui_b3_count_in{}'.format(n)]=ui_b_count['behavior_type3']*ui_b_count['cumcount']
-    ui_b_count['ui_b4_count_in{}'.format(n)]=ui_b_count['behavior_type4']*ui_b_count['cumcount']
-    ui_b_count=ui_b_count[['user_id','item_id','ui_b1_count_in{}'.format(n),'ui_b2_count_in{}'.format(n),'ui_b3_count_in{}'.format(n),'ui_b4_count_in{}'.format(n)]]
-    ui_b_count=ui_b_count.groupby(['user_id', 'item_id']).agg({'ui_b1_count_in{}'.format(n): np.sum,
-                                                          'ui_b2_count_in{}'.format(n): np.sum,
-                                                           'ui_b3_count_in{}'.format(n): np.sum,
-                                                          'ui_b4_count_in{}'.format(n): np.sum})
-    ui_b_count=ui_b_count.reset_index()
-    ui_b_count['ui_b_count_in{}'.format(n)]=ui_b_count['ui_b1_count_in{}'.format(n)]+ui_b_count['ui_b2_count_in{}'.format(n)]+ui_b_count['ui_b3_count_in{}'.format(n)]+ui_b_count['ui_b4_count_in{}'.format(n)]
-    return ui_b_count
+
 
 
 # In[ ]:
 
 
-ui_b_count_in1=ui_b_count(train_part,1,'2014-11-27')
-ui_b_count_in3=ui_b_count(train_part,3,'2014-11-25')
-ui_b_count_in6=ui_b_count(train_part,6,'2014-11-22')
-temp4=pd.merge(ui_b_count_in1,ui_b_count_in3,on=['user_id','item_id'],how='left')
-temp4=pd.merge(temp4,ui_b_count_in6,on=['user_id','item_id'],how='left')
+
 
 
 # In[ ]:
 
 
-#计算用户对类别在n天之前的行为数和行为总数
-def uc_b_count(data,n,date):
-    uc_b_count=data[data['time']>=np.datetime64(date)]
-    uc_b_count['cumcount']=uc_b_count.groupby(['user_id','item_category','behavior_type']).cumcount()+1
-    uc_b_count=uc_b_count.drop_duplicates(['user_id','item_category','behavior_type'],'last')[['user_id','item_category','behavior_type','cumcount']]
-    uc_b_count=pd.get_dummies(uc_b_count['behavior_type']).join(uc_b_count[['user_id','item_category','cumcount']])
-    uc_b_count=uc_b_count.rename(columns={1:'behavior_type1',2:'behavior_type2',3:'behavior_type3',4:'behavior_type4'})
-    uc_b_count['uc_b1_count_in{}'.format(n)]=uc_b_count['behavior_type1']*uc_b_count['cumcount']
-    uc_b_count['uc_b2_count_in{}'.format(n)]=uc_b_count['behavior_type2']*uc_b_count['cumcount']
-    uc_b_count['uc_b3_count_in{}'.format(n)]=uc_b_count['behavior_type3']*uc_b_count['cumcount']
-    uc_b_count['uc_b4_count_in{}'.format(n)]=uc_b_count['behavior_type4']*uc_b_count['cumcount']
-    uc_b_count=uc_b_count[['user_id','item_category','uc_b1_count_in{}'.format(n),'uc_b2_count_in{}'.format(n),'uc_b3_count_in{}'.format(n),'uc_b4_count_in{}'.format(n)]]
-    uc_b_count=uc_b_count.groupby(['user_id', 'item_category']).agg({'uc_b1_count_in{}'.format(n): np.sum,
-                                                          'uc_b2_count_in{}'.format(n): np.sum,
-                                                           'uc_b3_count_in{}'.format(n): np.sum,
-                                                          'uc_b4_count_in{}'.format(n): np.sum})
-    uc_b_count=uc_b_count.reset_index()
-    uc_b_count['uc_b_count_in{}'.format(n)]=uc_b_count['uc_b1_count_in{}'.format(n)]+uc_b_count['uc_b2_count_in{}'.format(n)]+uc_b_count['uc_b3_count_in{}'.format(n)]+uc_b_count['uc_b4_count_in{}'.format(n)]
-    return uc_b_count
+
 
 
 # In[ ]:
 
 
-uc_b_count_in1=uc_b_count(train_part,1,'2014-11-27')
-uc_b_count_in3=uc_b_count(train_part,3,'2014-11-25')
-uc_b_count_in6=uc_b_count(train_part,6,'2014-11-22')
 
-temp5=pd.merge(uc_b_count_in1,uc_b_count_in3,on=['user_id','item_category'],how='left')
-temp5=pd.merge(temp5,uc_b_count_in6,on=['user_id','item_category'],how='left')
 
 
 # In[ ]:
 
 
-#将特征集和需要预测的结果合并在一起
-final=pd.merge(temp5,temp1,on='user_id',how='inner')
-final=pd.merge(final,temp3,on='item_category',how='inner')
-final=pd.merge(final,temp2,on=['item_id'],how='inner')
-final=pd.merge(final,temp4,on=['user_id','item_category'],how='inner')
-target=test_part[['user_id','item_category','label']]
-final=pd.merge(final,target,on=['user_id','item_category'],how='inner')
+
 
 
 # In[ ]:
 
 
-#去掉不需要的列
-final=final.drop(columns=['user_geohash','user_id','item_category','time'],axis=1)
-X=final.drop(columns=['label'],axis=1)
-Y=final['label']
+
 
 
 # In[ ]:
 
 
-#使用Xgboost进行模型训练
-xg=XGBRegressor(max_depth=10, 
-    n_estimators=500, 
-    min_child_weight=150, 
-    colsample_bytree=0.8, 
-    subsample=0.7,
-    learning_rate=0.01,   
-    random_state=2020,
-    tree_method='gpu_hist',
-    gamma=100,
-    reg_lambda=0.6
 
-xg.fit(X,Y)
 
 
 # In[ ]:
 
 
-#使用GBDT+LR进行模型训练，GBDT自动构造特征,LR用来分类,将数据集一分成两部分，一部分用来GBDT一部分用于LR
-xhalf1,xhalf2,yhalf1,yhalf2=train_test_split(X,Y,train_size=0.5,random_state=2020)
-clf=GradientBoostingRegressor(n_estimators=50,learning_rate=0.01,max_depth=3,min_samples_split=2,random_state=000)
-clf.fit(xhalf1,yhalf1)
-onehot=OneHotEncoder(categories='auto')
-onehot.fit(clf.apply(x_half1))
 
-lr=LogisticRegression(solver='lbfgs',max_iter=1000)
-lr.fit(onehot.transform(clf.apply(xhalf2)),yhalf2)
 
 
 # In[ ]:
 
 
-#使用11-29-12-05的数据进行之前的特征工程，然后进行验证结果,使用roc进行结果检测
-y_predict=onehot.transform(clf.apply(x_val)))
-fp,tp,_=roc_curve(y_val,predict)
 
-#对12、13-12、18号数据进行特征构造，用来预估12.19号的商品购买
-y=onehot.trainsform(clf.apply(x_test))
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
 
