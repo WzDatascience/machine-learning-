@@ -19,6 +19,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import OneHotEncoder
 import gc
+from sklearn.metrics import f1_score1,roc_auc_score,roc_curve
 data=pd.read_csv('C:/Users/zhouwei/Desktop/fresh_comp_offline/tianchi_fresh_comp_train_user.csv')
 
 
@@ -729,6 +730,20 @@ xg.fit(X,Y)
 # In[ ]:
 
 
+#预测结果并使用f1_score进行测试
+y_predict=xg.predict(x_test)
+f1_score=f1_score(Y,y_predict)
+
+
+# In[ ]:
+
+
+y_predict.to_csv('/submission.csv',index=False)
+
+
+# In[ ]:
+
+
 #使用GBDT+LR进行模型训练，GBDT自动构造特征,LR用来分类,将数据集一分成两部分，一部分用来GBDT一部分用于LR
 xhalf1,xhalf2,yhalf1,yhalf2=train_test_split(X,Y,train_size=0.5,random_state=2020)
 clf=GradientBoostingRegressor(n_estimators=50,learning_rate=0.01,max_depth=3,min_samples_split=2,random_state=000)
@@ -746,11 +761,18 @@ lr.fit(onehot.transform(clf.apply(xhalf2)),yhalf2)
 #使用11-29-12-05的数据进行之前的特征工程，然后进行验证结果,使用roc进行结果检测
 y_predict=onehot.transform(clf.apply(x_val)))
 fp,tp,_=roc_curve(y_val,predict)
+#对12、13-12、18号数据进行特征构造，用来预估12.19号的商品购买
+y=onehot.transform(clf.apply(x_test))
 
 
 # In[ ]:
 
 
-#对12、13-12、18号数据进行特征构造，用来预估12.19号的商品购买
-y=onehot.transform(clf.apply(x_test))
+y.to_csv('/submission.csv',index=False)
+
+
+# In[ ]:
+
+
+
 
